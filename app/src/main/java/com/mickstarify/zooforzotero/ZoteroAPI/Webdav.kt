@@ -24,6 +24,7 @@ import okio.sink
 import okio.source
 import java.io.File
 import java.io.InputStream
+import java.net.ProtocolException
 import java.security.SecureRandom
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
@@ -34,15 +35,26 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
 class Webdav(
-    preferenceManager: PreferenceManager
+    private val preferenceManager: PreferenceManager
 ) {
     private var sardine: OkHttpSardine
     var address: String
 
 
-    fun testConnection(): Boolean {
-        return sardine.exists(address)
-    }
+	fun testConnection(): Boolean {
+		Log.d("zotero", "testConnection: address='$address'")
+		Log.d("zotero", "testConnection: authMode=${preferenceManager.getWebDAVAuthMode()}")
+		Log.d("zotero", "testConnection: username=${preferenceManager.getWebDAVUsername()}")
+
+		return try {
+			val result = sardine.exists(address)
+			Log.d("zotero", "testConnection result=$result")
+			result
+		} catch (e: Throwable) {
+			Log.e("zotero", "testConnection failed: ${e.javaClass.name}: ${e.message}", e)
+			throw e
+		}
+	}
 
     fun downloadPropToString(webpath: String): String {
         val reader = sardine.get(webpath).source()
@@ -130,6 +142,23 @@ class Webdav(
         return observable
     }
 
+	// Workaround for "HTTP 204 had non-zero Content-Length"
+	private fun safeDelete(url: String) {
+			try {
+				sardine.delete(url)
+			} catch (e: ProtocolException) {
+				Log.w("zotero", "WebDAV 204 workaround triggered: ${e.message}")
+				if (e.message?.startsWith("HTTP 204 had non-zero Content-Length") == true) {
+					// verify result
+					if (!sardine.exists(url)) {
+						Log.w("zotero", "Delete verified after ProtocolException; continuing.")
+						return
+					}
+				}
+				throw e
+			}
+		}
+
     fun uploadAttachment(
         attachment: Item,
         attachmentStorageManager: AttachmentStorageManager
@@ -175,10 +204,10 @@ class Webdav(
             // mostly useless step, delete any old _NEW.zip files that shouldn't exist
             // but might incase of a failed update earlier.
             if (sardine.exists(newZipPath)) {
-                sardine.delete(newZipPath)
+                safeDelete(newZipPath)
             }
             if (sardine.exists(newPropPath)) {
-                sardine.delete(newPropPath)
+                safeDelete(newPropPath)
             }
 
             // upload files
@@ -192,8 +221,8 @@ class Webdav(
             val zipPath = address + "/${attachment.itemKey.uppercase()}.zip"
             val propPath = address + "/${attachment.itemKey.uppercase()}.prop"
 
-            sardine.delete(propPath)
-            sardine.delete(zipPath)
+            safeDelete(propPath)
+            safeDelete(zipPath)
 
             sardine.move(newPropPath, propPath)
             sardine.move(newZipPath, zipPath)
@@ -210,14 +239,12 @@ class Webdav(
         val password = preferenceManager.getWebDAVPassword()
         val verifySSL = preferenceManager.getVerifySSLForWebDAV()
 
-
         val clientBuilder = OkHttpClient.Builder()
             .protocols(listOf(Protocol.HTTP_1_1, Protocol.HTTP_2))
             .callTimeout(0, TimeUnit.SECONDS) // no call timeout.
             .connectTimeout(preferenceManager.getWebDAVConnectTimeout(), TimeUnit.MILLISECONDS)
             .readTimeout(preferenceManager.getWebDAVReadTimeout(), TimeUnit.MILLISECONDS)
             .writeTimeout(preferenceManager.getWebDAVWriteTimeout(), TimeUnit.MILLISECONDS);
-
 
         if (username != "" && password != "") {
             val credentials = Credentials(username, password)
