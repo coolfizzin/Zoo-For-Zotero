@@ -49,6 +49,7 @@ class WebDAVSetup : AppCompatActivity() {
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
         preferenceManager = PreferenceManager(this)
+        Log.d("zotero", "onCreate: saved auth mode = ${preferenceManager.getWebDAVAuthMode()}")
 
         textInputLayout_connectTimeout = findViewById(R.id.textInputLayout_webdav_connect_timeout)
         textInputLayout_readTimeout = findViewById(R.id.textInputLayout_webdav_read_timeout)
@@ -70,36 +71,32 @@ class WebDAVSetup : AppCompatActivity() {
                 "DIGEST"
             )
         )
-        (textInputLayout_auth_mode.editText as AutoCompleteTextView).apply {
-            setAdapter(authModeAdapter)
+			(textInputLayout_auth_mode.editText as AutoCompleteTextView).apply {
+				setAdapter(authModeAdapter)
 
-            this.listSelection = when (preferenceManager.getWebDAVAuthMode()) {
-                WebdavAuthMode.AUTOMATIC -> 0
-                WebdavAuthMode.BASIC -> 1
-                WebdavAuthMode.DIGEST -> 2
-            }
+				val savedAuthMode = preferenceManager.getWebDAVAuthMode()
+				val savedIndex = when (savedAuthMode) {
+					WebdavAuthMode.AUTOMATIC -> 0
+					WebdavAuthMode.BASIC -> 1
+					WebdavAuthMode.DIGEST -> 2
+				}
 
-            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(
-                    parent: AdapterView<*>?,
-                    view: View?,
-                    position: Int,
-                    id: Long
-                ) {
-                    val authMode = when (position) {
-                        0 -> WebdavAuthMode.AUTOMATIC
-                        1 -> WebdavAuthMode.BASIC
-                        2 -> WebdavAuthMode.DIGEST
-                        else -> WebdavAuthMode.AUTOMATIC
-                    }
-                    Log.d("Webdav", "Setting auth mode to ${authMode}")
-                    preferenceManager.setWebDAVAuthMode(authMode)
-                }
+				Log.d("zotero", "Auth UI init: savedAuthMode=$savedAuthMode savedIndex=$savedIndex")
 
-                override fun onNothingSelected(p0: AdapterView<*>?) {
-                }
-            }
-        }
+				// Show the saved value in the text box itself
+				setText(authModeAdapter.getItem(savedIndex), false)
+
+				setOnItemClickListener { parent, view, position, id ->
+					val authMode = when (position) {
+						0 -> WebdavAuthMode.AUTOMATIC
+						1 -> WebdavAuthMode.BASIC
+						2 -> WebdavAuthMode.DIGEST
+						else -> WebdavAuthMode.AUTOMATIC
+					}
+					preferenceManager.setWebDAVAuthMode(authMode)
+					Log.d("zotero", "Auth mode saved: ${preferenceManager.getWebDAVAuthMode()}")
+				}
+			}
 
         loadConfig()
 
@@ -199,6 +196,13 @@ class WebDAVSetup : AppCompatActivity() {
         textInputLayout_writeTimeout.editText!!.setText(
             preferenceManager.getWebDAVWriteTimeout().toString()
         )
+        	val authText = when (preferenceManager.getWebDAVAuthMode()) {
+				WebdavAuthMode.AUTOMATIC -> "AUTOMATIC"
+				WebdavAuthMode.BASIC -> "BASIC"
+				WebdavAuthMode.DIGEST -> "DIGEST"
+			}
+		(textInputLayout_auth_mode.editText as AutoCompleteTextView).setText(authText, false)
+		Log.d("zotero", "loadConfig: auth field text set to '$authText'")
     }
 
     private fun toggleAdvancedConfig() {
@@ -242,35 +246,42 @@ class WebDAVSetup : AppCompatActivity() {
         return !findViewById<CheckBox>(R.id.checkBox_Verify_ssl).isChecked
     }
 
-    fun makeConnection(address: String, username: String, password: String) {
-        val webDav = Webdav(preferenceManager)
-        startProgressDialog()
-        Completable.fromAction {
-            var status = false // default to false incase we get an exception
-            var hadAuthenticationError = false
-            var errorMessage = "unset"
-            status = webDav.testConnection()
-            if (status == false) {
-                throw Exception("Unspecified error.")
-            }
-        }.subscribeOn(Schedulers.io())
-            .observeOn(AndroidSchedulers.mainThread())
-            .subscribe(object : CompletableObserver {
-                override fun onSubscribe(d: Disposable) {
-                }
+fun makeConnection(address: String, username: String, password: String) {
+	Log.d(
+		"zotero",
+		"makeConnection called: address='$address', user='$username', savedAuthMode=${preferenceManager.getWebDAVAuthMode()}, verifySSL=${preferenceManager.getVerifySSLForWebDAV()}, addZotero=${preferenceManager.getWebDAVAddZoteroToUrl()}"
+	)
 
-                override fun onComplete() {
-                    setWebDAVAuthentication(address, username, password)
-                    hideProgressDialog()
-                }
+	val webDav = Webdav(preferenceManager)
+	startProgressDialog()
 
-                override fun onError(e: Throwable) {
-                    notifyFailed("Error setting up webdav, message: $e")
-                    hideProgressDialog()
-                }
+	Completable.fromAction {
+		Log.d("zotero", "testConnection starting on background thread")
+		val status = webDav.testConnection()
+		Log.d("zotero", "testConnection returned status=$status")
+		if (!status) {
+			throw Exception("Unspecified error.")
+		}
+	}.subscribeOn(Schedulers.io())
+		.observeOn(AndroidSchedulers.mainThread())
+		.subscribe(object : CompletableObserver {
+			override fun onSubscribe(d: Disposable) {
+				Log.d("zotero", "makeConnection onSubscribe")
+			}
 
-            })
-    }
+			override fun onComplete() {
+				Log.d("zotero", "makeConnection onComplete; saving final auth")
+				setWebDAVAuthentication(address, username, password)
+				hideProgressDialog()
+			}
+
+			override fun onError(e: Throwable) {
+				Log.e("zotero", "makeConnection onError: ${e.javaClass.name}: ${e.message}", e)
+				notifyFailed("Error setting up webdav, message: $e")
+				hideProgressDialog()
+			}
+		})
+	}
 
     var progressDialog: ProgressDialog? = null
     fun startProgressDialog() {

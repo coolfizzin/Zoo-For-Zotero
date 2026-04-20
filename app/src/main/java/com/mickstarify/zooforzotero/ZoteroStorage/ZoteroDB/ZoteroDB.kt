@@ -114,28 +114,30 @@ class ZoteroDB(
         ))
     }
 
-    fun loadItemsFromDatabase(): Completable {
-        /* Load the items from Database as well as all the attachments. */
-        val completable =
-            Completable.fromMaybe(zoteroDatabase.getItemsForGroup(groupID).doOnSuccess(
-                Consumer {
-                    Log.d("zotero", "loaded ${it.size} items from DB for groupID=$groupID, setting now.")
-                    items = it
-                }
-            )).andThen(
-                Completable.fromMaybe(
-                    zoteroDatabase.getAttachmentsForGroup(groupID).doOnSuccess(Consumer {
-                        Log.d("zotero", "Loading attachmentInfo from Database")
-                        attachmentInfo = HashMap<String, AttachmentInfo>()
-                        for (attachment in it) {
-                            attachmentInfo!![attachment.itemKey] = attachment
-                        }
-                    })
-                )
-            )
-        return completable
-    }
+	fun loadItemsFromDatabase(): Completable {
+      /* Load the items from Database as well as all the attachments. */
+		attachmentInfo = HashMap<String, AttachmentInfo>()
 
+		return Completable.fromMaybe(
+			zoteroDatabase.getItemsForGroup(groupID).doOnSuccess(
+				Consumer {
+					Log.d("zotero", "loaded ${it.size} items from DB for groupID=$groupID, setting now.")
+					items = it
+				}
+			)
+		).andThen(
+			Completable.fromMaybe(
+				zoteroDatabase.getAttachmentsForGroup(groupID).doOnSuccess(
+					Consumer { list ->
+						Log.d("zotero", "Loading attachmentInfo from Database: ${list.size} rows for groupID=$groupID")
+						for (attachment in list) {
+							attachmentInfo!![attachment.itemKey] = attachment
+						}
+					}
+				)
+			)
+		)
+	}
 
     fun loadTrashItemsFromDB(): Completable{
         zoteroDatabase.getItemsFromUserTrash()
@@ -422,7 +424,8 @@ class ZoteroDB(
         itemKey: String,
         md5Key: String,
         mtime: Long,
-        downloadedFrom: String = AttachmentInfo.UNSET
+        downloadedFrom: String = AttachmentInfo.UNSET,
+			remoteSizeBytes: Long? = -1L
     ): Completable {
         val mDownloadedFrom = if (downloadedFrom == AttachmentInfo.UNSET) {
             // check to see if webdav is on, which implies that i was downloaded from webdav.
@@ -434,8 +437,16 @@ class ZoteroDB(
         } else {
             downloadedFrom
         }
-        val attachmentInfo = AttachmentInfo(itemKey, groupID, md5Key, mtime, mDownloadedFrom)
-        Log.d("zotero", "adding metadata for ${itemKey}, $md5Key - ${mDownloadedFrom}")
+		val existingInfo = attachmentInfo?.get(itemKey)
+		val attachmentInfo = AttachmentInfo(
+			itemKey,
+			groupID,
+			md5Key,
+			mtime,
+			mDownloadedFrom,
+			remoteSizeBytes ?: existingInfo?.remoteSizeBytes ?: -1L
+		)
+		Log.d("zotero", "adding metadata for $itemKey, $md5Key - $mDownloadedFrom (size=$remoteSizeBytes)")
 
         this.attachmentInfo!![itemKey] = attachmentInfo
         return zoteroDatabase.writeAttachmentInfo(attachmentInfo)
@@ -488,7 +499,7 @@ class ZoteroDB(
         }
 
         val itemsWithTag = LinkedList<Item>()
-        
+
         for (item in this.items!!){
             if (item.tags.filter { it.tag == tagName }.any()){
                 itemsWithTag.add(item)

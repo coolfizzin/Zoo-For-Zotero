@@ -34,7 +34,8 @@ class AttachmentInfo(
     @ColumnInfo(name = "group") val groupParent: Int = Collection.NO_GROUP_ID,
     @ColumnInfo(name = "md5Key") val md5Key: String = "",
     @ColumnInfo(name = "mtime") val mtime: Long,
-    @ColumnInfo(name = "downloadedFrom") val downloadedFrom: String = UNSET
+    @ColumnInfo(name = "downloadedFrom") val downloadedFrom: String = UNSET,
+	 @ColumnInfo(name = "remoteSizeBytes") val remoteSizeBytes: Long = -1L
 ) : Parcelable {
     companion object {
         const val UNSET = "UNSET"

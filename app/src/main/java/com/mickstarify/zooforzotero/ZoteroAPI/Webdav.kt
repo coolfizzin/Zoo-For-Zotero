@@ -167,7 +167,7 @@ class Webdav(
         * 1. Compress attachment into a ZIP file (using internal cache dir)
         * 2. Create  F3FXJF_NEW.prop file.
         * 3. Upload to webdav server F3FXJF_NEW.zip and F3FXJF_NEW.prop
-        * 4. send a delete request and  rename request to server so we have
+        * 4. send a delete request and rename request to server so we have
         *  F3FXJF.zip + F3FXJF.prop resulting*/
 
         return Completable.fromAction {
@@ -214,6 +214,7 @@ class Webdav(
             sardine.put(newPropPath, propFile, "text/plain")
             sardine.put(newZipPath, zipFile, "application/zip")
 
+            // Delete temporary files from app storage
             zipFile.delete()
             propFile.delete()
 
@@ -221,9 +222,11 @@ class Webdav(
             val zipPath = address + "/${attachment.itemKey.uppercase()}.zip"
             val propPath = address + "/${attachment.itemKey.uppercase()}.prop"
 
+            // Delete old remote files
             safeDelete(propPath)
             safeDelete(zipPath)
 
+            // Overwrite remote files
             sardine.move(newPropPath, propPath)
             sardine.move(newZipPath, zipPath)
 

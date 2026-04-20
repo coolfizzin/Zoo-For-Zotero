@@ -50,26 +50,34 @@ val MIGRATION_5_6 = object: Migration(5,6){
         // Create new table with correct primary key structure
         database.execSQL("""
             CREATE TABLE IF NOT EXISTS `ItemCreator_new` (
-                `parent` TEXT NOT NULL, 
-                `firstName` TEXT NOT NULL, 
-                `lastName` TEXT NOT NULL, 
-                `creatorType` TEXT NOT NULL, 
-                `order` INTEGER NOT NULL, 
-                PRIMARY KEY(`parent`, `firstName`, `lastName`, `creatorType`), 
+                `parent` TEXT NOT NULL,
+                `firstName` TEXT NOT NULL,
+                `lastName` TEXT NOT NULL,
+                `creatorType` TEXT NOT NULL,
+                `order` INTEGER NOT NULL,
+                PRIMARY KEY(`parent`, `firstName`, `lastName`, `creatorType`),
                 FOREIGN KEY(`parent`) REFERENCES `ItemInfo`(`itemKey`) ON UPDATE NO ACTION ON DELETE CASCADE
             )
         """.trimIndent())
-        
+
         // Copy data from old table to new table
         database.execSQL("""
-            INSERT INTO ItemCreator_new (parent, firstName, lastName, creatorType, `order`) 
+            INSERT INTO ItemCreator_new (parent, firstName, lastName, creatorType, `order`)
             SELECT parent, firstName, lastName, creatorType, `order` FROM ItemCreator
         """.trimIndent())
-        
+
         // Drop old table
         database.execSQL("DROP TABLE ItemCreator")
-        
+
         // Rename new table
         database.execSQL("ALTER TABLE ItemCreator_new RENAME TO ItemCreator")
     }
+}
+
+val MIGRATION_6_7 = object : Migration(6, 7) {
+	override fun migrate(database: SupportSQLiteDatabase) {
+		database.execSQL(
+			"ALTER TABLE AttachmentInfo ADD COLUMN remoteSizeBytes INTEGER NOT NULL DEFAULT -1"
+		)
+	}
 }

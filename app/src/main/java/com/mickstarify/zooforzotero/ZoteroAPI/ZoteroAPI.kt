@@ -37,8 +37,10 @@ import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.adapter.rxjava3.RxJava3CallAdapterFactory
 import retrofit2.converter.gson.GsonConverterFactory
+import java.io.IOException
 import java.util.LinkedList
 import java.util.concurrent.TimeUnit
+import kotlin.math.min
 
 
 const val BASE_URL = "https://api.zotero.org"
@@ -158,9 +160,6 @@ class ZoteroAPI(
             //stops here.
         }
 
-
-        val outputFileStream = attachmentStorageManager.getItemOutputStream(item)
-
         val observable = Observable.create<DownloadProgress> { emitter ->
 
             val downloader = if (!useGroup) {
@@ -169,10 +168,6 @@ class ZoteroAPI(
                 service.getFileForGroup(groupID, item.itemKey)
             }
             downloader.subscribe(object : Observer<Response<ResponseBody>> {
-                override fun onComplete() {
-                    emitter.onComplete()
-                }
-
                 override fun onSubscribe(d: Disposable) {
                     // do nothing.
                 }
@@ -183,41 +178,51 @@ class ZoteroAPI(
                         return
                     }
 
-                    val inputStream = response.body()?.byteStream()
-                    val fileSize = response.body()?.contentLength() ?: 0
-                    if (response.code() == 200) {
-                        val buffer = ByteArray(64768)
-                        var read = inputStream?.read(buffer) ?: 0
-                        var progress: Long = 0
-                        val md5Hash = item.data["md5"] ?: ""
-                        val mtime = (item.data["mtime"] ?: "0").toLong()
-                        while (read > 0) {
-                            try {
-                                progress += read
-                                emitter.onNext(
-                                    DownloadProgress(
-                                        progress = progress,
-                                        total = fileSize,
-                                        metadataHash = md5Hash,
-                                        mtime = mtime
-                                    )
-                                )
-                                outputFileStream.write(buffer, 0, read)
-                                read = inputStream?.read(buffer) ?: 0
-                            } catch (e: java.io.InterruptedIOException) {
-                                outputFileStream.close()
-                                inputStream?.close()
-                                throw (e)
-                            }
-                            progress += read
-                        }
-                        emitter.onComplete()
-                    } else if (response.code() == 404) {
+						  if (response.code() == 404) {
                         throw ZoteroNotFoundException("Not found on server.")
-                    } else {
+                    } else if (response.code() != 200) {
                         Log.e("zotero", "network error. response: ${response.body()}")
                         throw RuntimeException("Invalid server response code ${response.code()}")
                     }
+
+                		// HTTP 200: Continue
+                		val body = response.body() ?: throw IOException("Empty response body")
+							val fileSize = body.contentLength()
+
+
+                    // use()'s here will automatically close inputStream and outputSteam after ending
+							body.byteStream().use { inputStream ->
+								attachmentStorageManager.getItemOutputStream(item).use { outputFileStream ->
+									val buffer = ByteArray(64768)
+		                     var read = inputStream.read(buffer)
+		                     var progress: Long = 0
+		                     val md5Hash = item.data["md5"] ?: ""
+		                     val mtime = (item.data["mtime"] ?: "0").toLong()
+		                     while (read != -1) {
+			                    if (emitter.isDisposed == true) {
+			                        Log.d("zotero", "download was cancelled in progress.")
+			                        return
+			                    }
+                             progress += read
+                             outputFileStream.write(buffer, 0, read)
+                             emitter.onNext(
+                                 DownloadProgress(
+                                     progress = min(progress, fileSize),
+                                     total = fileSize,
+                                     metadataHash = md5Hash,
+                                     mtime = mtime
+                                 )
+                             )
+                             read = inputStream.read(buffer)
+		                     }
+		                 		// Success: onComplete() will occur next
+
+                     	}
+							}
+                }
+
+                override fun onComplete() {
+                    emitter.onComplete()
                 }
 
                 override fun onError(e: Throwable) {

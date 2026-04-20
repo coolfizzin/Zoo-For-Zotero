@@ -44,9 +44,45 @@ import java.io.FileNotFoundException
 import java.util.LinkedList
 import java.util.Stack
 import java.util.concurrent.TimeUnit
+import java.text.NumberFormat
+import java.util.Locale
+import kotlin.math.ln
+import kotlin.math.pow
 import com.mickstarify.zooforzotero.ZoteroStorage.Database.Collection as ZoteroCollection
 
 private const val TAG = "LibraryActivityModel"
+
+private fun formatTimestamp(timestamp: Long?): String {
+	if (timestamp == null || timestamp <= 0) return "Unknown"
+	return java.text.DateFormat.getDateTimeInstance().format(java.util.Date(timestamp))
+}
+
+private fun formatWindowsStyleSize(byteCount: Long): String
+{
+	if (byteCount < 0) return "Unknown"
+
+	val units = arrayOf("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+	val formatter = NumberFormat.getNumberInstance(Locale.US)
+
+	// Bytes case (no decimal)
+	if (byteCount < 1024)
+	{
+		return "${formatter.format(byteCount)} B"
+	}
+
+	// Determine unit index
+	val unitIndex = (ln(byteCount.toDouble()) / ln(1024.0)).toInt().coerceAtMost(units.lastIndex)
+
+	val unitValue = 1024.0.pow(unitIndex.toDouble())
+	val value = byteCount / unitValue
+
+	// Windows typically uses 2 decimal places for KiB and above
+	val valueFormatted = String.format(Locale.US, "%.2f", value)
+
+	val bytesFormatted = formatter.format(byteCount)
+
+	return "$valueFormatted ${units[unitIndex]} ($bytesFormatted B)"
+}
 
 class LibraryActivityModel(private val presenter: Contract.Presenter, val context: Context) :
     Contract.Model, OnSyncChangeListener {
@@ -333,6 +369,8 @@ class LibraryActivityModel(private val presenter: Contract.Presenter, val contex
             .observeOn(AndroidSchedulers.mainThread())
             .subscribe(object : Observer<DownloadProgress> {
                 var receivedMetadata = false
+					 var downloadedMetadataHash = ""
+					 var downloadedMtime = 0L
 
                 override fun onComplete() {
                     isDownloading = false
@@ -350,6 +388,20 @@ class LibraryActivityModel(private val presenter: Contract.Presenter, val contex
                         attachmentStorageManager.deleteAttachment(item)
                         return
                     } else {
+								if (receivedMetadata && downloadedMetadataHash != "") {
+									val remoteSizeBytes = attachmentStorageManager.getFileSize(item).getOrDefault(-1L)
+									zoteroDB.updateAttachmentMetadata(
+										item.itemKey,
+										downloadedMetadataHash,
+										downloadedMtime,
+										if (preferences.isWebDAVEnabled()) {
+											AttachmentInfo.WEBDAV
+										} else {
+											AttachmentInfo.ZOTEROAPI
+										},
+										remoteSizeBytes
+									).subscribeOn(Schedulers.io()).subscribe()
+								}
                         openPDF(item)
                     }
                 }
@@ -363,16 +415,8 @@ class LibraryActivityModel(private val presenter: Contract.Presenter, val contex
                     presenter.updateAttachmentDownloadProgress(t.progress, t.total)
                     if (!receivedMetadata && t.metadataHash != "") {
                         receivedMetadata = true
-                        zoteroDB.updateAttachmentMetadata(
-                            item.itemKey,
-                            t.metadataHash,
-                            t.mtime,
-                            if (preferences.isWebDAVEnabled()) {
-                                AttachmentInfo.WEBDAV
-                            } else {
-                                AttachmentInfo.ZOTEROAPI
-                            }
-                        ).subscribeOn(Schedulers.io()).subscribe()
+								downloadedMetadataHash = t.metadataHash
+								downloadedMtime = t.mtime
                     }
                 }
 
@@ -690,47 +734,83 @@ class LibraryActivityModel(private val presenter: Contract.Presenter, val contex
             })
     }
 
-    fun askToUploadAttachments(changedAttachments: List<Pair<Item, Int>>) {
+	fun askToUploadAttachments(changedAttachments: List<Pair<Item, Int>>) {
         // for the sake of sanity I will only ask to upload 1 attachment.
         // this is because of limitations of only having 1 upload occur concurrently
         // and my unwillingness to implement a chaining mechanism for uploads for what i expect to
         // be a niche power user.
-        val attachment = changedAttachments.first().first
-        val version = changedAttachments.first().second
-        val fileSizeBytes = attachmentStorageManager.getFileSize(
-            attachmentStorageManager.getAttachmentUri(attachment)
-        )
+		val attachment = changedAttachments.first().first
+		val openedVersion = changedAttachments.first().second
 
-        if (fileSizeBytes == 0L) {
-            Log.e("zotero", "avoiding uploading a garbage PDF")
-            attachmentStorageManager.deleteAttachment(attachment)
-            removeFromRecentlyViewed(attachment)
-            return
-        }
+		val localSizeBytes = attachmentStorageManager.getFileSize(
+			attachmentStorageManager.getAttachmentUri(attachment)
+		)
 
-        val sizeKiloBytes = "${fileSizeBytes / 1000}KB"
+		if (localSizeBytes == 0L) {
+			Log.e("zotero", "avoiding uploading a garbage PDF")
+			attachmentStorageManager.deleteAttachment(attachment)
+			removeFromRecentlyViewed(attachment)
+			return
+		}
+		Log.d("zotero", "askToUploadAttachments: attachment.itemKey=${attachment.itemKey}")
+		Log.d("zotero", "askToUploadAttachments: attachmentInfo map size=${zoteroDB.attachmentInfo?.size ?: -1}")
+		Log.d("zotero", "askToUploadAttachments: map contains key=${zoteroDB.attachmentInfo?.containsKey(attachment.itemKey)}")
 
-        val message =
-            "${attachment.data["filename"]!!} ($sizeKiloBytes) is different to Zotero's version. Would you like to upload this PDF to replace the remote version?"
+		val attachmentInfo = zoteroDB.attachmentInfo?.get(attachment.itemKey)
 
-        presenter.createYesNoPrompt(
-            "Detected changes to attachment",
-            message,
-            "Upload",
-            "No",
-            {
-                if (version < attachment.getVersion()) {
-                    presenter.createYesNoPrompt("Outdated Version",
-                        "This local copy is older than the version on Zotero's server, are you sure you upload (this will irreversibly overwrite the server's copy)",
-                        "I am sure",
-                        "Cancel",
-                        { uploadAttachment(attachment) },
-                        { removeFromRecentlyViewed(attachment) })
-                }
-                uploadAttachment(attachment)
-            },
-            { removeFromRecentlyViewed(attachment) })
-    }
+		Log.d(
+			"zotero",
+			"askToUploadAttachments: metadata for ${attachment.itemKey} -> " +
+				(if (attachmentInfo == null) "null" else "mtime=${attachmentInfo.mtime}, size=${attachmentInfo.remoteSizeBytes}")
+		)
+		val remoteSizeBytes = attachmentInfo?.remoteSizeBytes ?: -1L
+		val localSizeText = formatWindowsStyleSize(localSizeBytes)
+		val remoteSizeText = formatWindowsStyleSize(remoteSizeBytes)
+
+		val localMtime = attachmentStorageManager.getMtime(attachment)
+		val remoteMtime = attachmentInfo?.mtime
+		val localMtimeText = formatTimestamp(localMtime)
+		val remoteMtimeText = formatTimestamp(remoteMtime)
+
+		val filename = attachment.data["filename"] ?: attachment.getTitle()
+		val serverIsNewer = openedVersion < attachment.getVersion()
+		val hasRemoteSize = remoteSizeBytes >= 0
+		val hasRemoteMtime = remoteMtime != null && remoteMtime > 0
+
+		val message = buildString {
+			appendLine("$filename has local changes.")
+			appendLine()
+			appendLine("Local file:")
+			appendLine("• Size: $localSizeText")
+			appendLine("• Modified: $localMtimeText")
+
+			if (hasRemoteSize || hasRemoteMtime) {
+				appendLine()
+				appendLine("Server copy:")
+				if (hasRemoteSize) {
+					appendLine("• Size: $remoteSizeText")
+				}
+				if (hasRemoteMtime) {
+					appendLine("• Modified: $remoteMtimeText")
+				}
+			}
+			if (serverIsNewer) {
+				appendLine()
+				appendLine("Warning: the server copy is newer than the version you originally opened. Uploading will overwrite the server copy!")
+			}
+			appendLine()
+			append("Upload this file to replace the remote version?")
+		}
+
+		presenter.createYesNoPrompt(
+			"Upload changed attachment",
+			message,
+			if (serverIsNewer) "Overwrite server copy" else "Upload",
+			"No",
+			{ uploadAttachment(attachment) },
+			{ removeFromRecentlyViewed(attachment) }
+		)
+	}
 
     override fun uploadAttachment(attachment: Item) {
         val md5Key: String
@@ -763,11 +843,13 @@ class LibraryActivityModel(private val presenter: Contract.Presenter, val contex
                         override fun onComplete() {
                             presenter.stopUploadingAttachmentProgress()
                             removeFromRecentlyViewed(attachment)
+                            val remoteSizeBytes = attachmentStorageManager.getFileSize(attachment).getOrDefault(-1L)
                             zoteroDB.updateAttachmentMetadata(
                                 attachment.itemKey,
                                 attachmentStorageManager.calculateMd5(attachment),
                                 attachmentStorageManager.getMtime(attachment),
-                                AttachmentInfo.WEBDAV
+                                AttachmentInfo.WEBDAV,
+										  remoteSizeBytes
                             ).subscribeOn(Schedulers.io()).subscribe()
                         }
 
@@ -794,11 +876,13 @@ class LibraryActivityModel(private val presenter: Contract.Presenter, val contex
                     override fun onComplete() {
                         presenter.stopUploadingAttachmentProgress()
                         removeFromRecentlyViewed(attachment)
+            				val remoteSizeBytes = attachmentStorageManager.getFileSize(attachment).getOrDefault(-1L)
                         zoteroDB.updateAttachmentMetadata(
                             attachment.itemKey,
                             attachmentStorageManager.calculateMd5(attachment),
                             attachmentStorageManager.getMtime(attachment),
-                            AttachmentInfo.ZOTEROAPI
+                            AttachmentInfo.ZOTEROAPI,
+									 remoteSizeBytes
                         ).subscribeOn(Schedulers.io()).subscribe()
                     }
 
@@ -809,11 +893,13 @@ class LibraryActivityModel(private val presenter: Contract.Presenter, val contex
                     override fun onError(e: Throwable) {
                         if (e is AlreadyUploadedException) {
                             removeFromRecentlyViewed(attachment)
+            					 val remoteSizeBytes = attachmentStorageManager.getFileSize(attachment).getOrDefault(-1L)
                             zoteroDB.updateAttachmentMetadata(
                                 attachment.itemKey,
                                 attachmentStorageManager.calculateMd5(attachment),
                                 attachmentStorageManager.getMtime(attachment),
-                                AttachmentInfo.WEBDAV
+                                AttachmentInfo.WEBDAV,
+									 	  remoteSizeBytes
                             ).subscribeOn(Schedulers.io()).subscribe()
                             presenter.makeToastAlert("Attachment already up to date.")
                         } else if (e is PreconditionFailedException) {
